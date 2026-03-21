@@ -35,7 +35,7 @@ class BenchmarkExecutor:
     def __init__(
         self,
         config: BenchmarkConfig,
-        llm_config: LLMConfig,
+        llm_config: LLMConfig = None,
         orchestrator_class=None,
         orchestrator_kwargs=None,
         config_path: str = "config.json",
@@ -106,20 +106,25 @@ class BenchmarkExecutor:
                 f"Applied tool restrictions: {original_count} -> {len(self.available_tools)} tools"
             )
 
-        # Initialize LLM client
-        self.llm_client = LLMClient(
-            self.llm_config.llm_provider,
-            self.llm_config.llm_model,
-            self.llm_config.llm_api_key,
-            api_endpoint=self.llm_config.llm_api_endpoint,
-            api_version=self.llm_config.llm_api_version,
-            region=self.llm_config.llm_region,
-            temperature=self.llm_config.temperature,
-            max_tokens=self.llm_config.max_tokens,
-            top_p=self.llm_config.top_p,
-            effort=self.llm_config.effort,
-            reasoning=self.llm_config.reasoning,
-        )
+        # Initialize LLM client (skip for external agent orchestrator — it brings its own LLM)
+        from orchestrators.external_agent import ExternalAgentOrchestrator
+        if self.orchestrator_class is not ExternalAgentOrchestrator:
+            self.llm_client = LLMClient(
+                self.llm_config.llm_provider,
+                self.llm_config.llm_model,
+                self.llm_config.llm_api_key,
+                api_endpoint=self.llm_config.llm_api_endpoint,
+                api_version=self.llm_config.llm_api_version,
+                region=self.llm_config.llm_region,
+                temperature=self.llm_config.temperature,
+                max_tokens=self.llm_config.max_tokens,
+                top_p=self.llm_config.top_p,
+                effort=self.llm_config.effort,
+                reasoning=self.llm_config.reasoning,
+            )
+        else:
+            self.llm_client = None
+            logger.info("Skipping LLM client init (external agent orchestrator)")
 
         # Initialize verifier engine (multi-gym aware)
         # Pass all MCP clients so verifiers can query the correct gym database
@@ -483,9 +488,12 @@ class BenchmarkExecutor:
         """Execute complete benchmark with multiple runs"""
         logger.info(f"\n{'='*80}")
         logger.info(f"STARTING BENCHMARK EXECUTION")
-        logger.info(
-            f"Model: {self.llm_config.llm_provider}/{self.llm_config.llm_model}"
-        )
+        if self.llm_config:
+            logger.info(
+                f"Model: {self.llm_config.llm_provider}/{self.llm_config.llm_model}"
+            )
+        else:
+            logger.info("Model: external agent")
         logger.info(f"Number of runs: {self.config.number_of_runs}")
         logger.info(f"{'='*80}\n")
 
@@ -503,7 +511,27 @@ class BenchmarkExecutor:
         logger.info(f"\n✅ All master databases created successfully\n")
 
         try:
-            await self.initialize()
+            # For external agent orchestrator, skip full MCP initialization
+            # (connect + tool discovery) — the external agent does that itself.
+            # We still create MCPClient objects so execute_single_run can set
+            # database_id and verifiers can query the gym databases.
+            from orchestrators.external_agent import ExternalAgentOrchestrator
+            if self.orchestrator_class is not ExternalAgentOrchestrator:
+                await self.initialize()
+            else:
+                self.gym_configs = self._parse_gym_configs()
+                for gym_conf in self.gym_configs:
+                    gym_name = gym_conf["mcp_server_name"]
+                    self.mcp_clients[gym_name] = MCPClient(
+                        base_url=gym_conf["mcp_server_url"],
+                        auth_config=gym_conf.get("auth_config"),
+                        mcp_endpoint=gym_conf.get("mcp_endpoint", "/mcp"),
+                        database_id=gym_conf.get("database_id", ""),
+                        context=gym_conf.get("context", {}),
+                    )
+                self.verifier_engine = VerifierEngine(self.mcp_clients, None)
+                logger.info("Skipping MCP connect (external agent orchestrator)")
+                logger.info("✅ Initialization complete")
 
             all_runs = []
 
@@ -525,7 +553,7 @@ class BenchmarkExecutor:
             statistics = self._calculate_statistics(all_runs)
             result = {
                 "benchmark_config": {
-                    "model": f"{self.llm_config.llm_provider}/{self.llm_config.llm_model}",
+                    "model": f"{self.llm_config.llm_provider}/{self.llm_config.llm_model}" if self.llm_config else "external_agent",
                     "number_of_runs": self.config.number_of_runs,
                     "user_prompt": self.config.user_prompt,
                     "gym_servers": [

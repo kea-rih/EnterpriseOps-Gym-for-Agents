@@ -36,11 +36,13 @@ from utils.task_queue_worker import TaskQueueWorker
 from orchestrators.react import ReactOrchestrator
 from orchestrators.planner_react import PlannerReactOrchestrator
 from orchestrators.decomposing_planner import DecomposingPlannerOrchestrator
+from orchestrators.external_agent import ExternalAgentOrchestrator
 
 ORCHESTRATOR_MAP = {
     "react": ReactOrchestrator,
     "planner_react": PlannerReactOrchestrator,
     "decomposing": DecomposingPlannerOrchestrator,
+    "external": ExternalAgentOrchestrator,
 }
 
 # Set up logging
@@ -188,25 +190,30 @@ def load_config(config_path: str = "config.json") -> BenchmarkConfig:
 
 async def execute_sample(
     config_file, llm_config, output_folder,
-    orchestrator="react", planner_llm_config=None, max_num_attempts=5
+    orchestrator="react", planner_llm_config=None, orchestrator_kwargs=None,
+    max_num_attempts=5,
 ):
     if skip_sample(config_file, output_folder):
         print(f"Skipping already processed config: {config_file}")
         return
     print(f"Running benchmark for config: {config_file}")
     config = load_config(config_file)
-    llm_config = random.choice(
-        load_llm_configs(llm_config)
-    )  # MARKER: Load balancer picks a random LLM instance
-    try:
-        logger.info(f"Using LLM config: {llm_config.llm_api_endpoint}")
-    except Exception:
-        logger.info(f"Failed to log LLM config endpoint.")
-
     orchestrator_class = ORCHESTRATOR_MAP[orchestrator]
-    orchestrator_kwargs = {}
+
+    if orchestrator == "external":
+        llm_config = None
+    else:
+        llm_config = random.choice(
+            load_llm_configs(llm_config)
+        )  # MARKER: Load balancer picks a random LLM instance
+        try:
+            logger.info(f"Using LLM config: {llm_config.llm_api_endpoint}")
+        except Exception:
+            logger.info(f"Failed to log LLM config endpoint.")
+
+    extra_kwargs = dict(orchestrator_kwargs or {})
     if planner_llm_config is not None:
-        orchestrator_kwargs["planner_llm_config"] = random.choice(
+        extra_kwargs["planner_llm_config"] = random.choice(
             load_llm_configs(planner_llm_config)
         )
 
@@ -214,7 +221,7 @@ async def execute_sample(
         config,
         llm_config=llm_config,
         orchestrator_class=orchestrator_class,
-        orchestrator_kwargs=orchestrator_kwargs,
+        orchestrator_kwargs=extra_kwargs,
         config_path=config_file,
     )
 
@@ -264,7 +271,7 @@ async def main():
         "--orchestrator",
         type=str,
         default="react",
-        choices=["react", "planner_react", "decomposing"],
+        choices=list(ORCHESTRATOR_MAP.keys()),
         help="Orchestration strategy.",
     )
     parser.add_argument(
@@ -273,7 +280,17 @@ async def main():
         default=None,
         help="Path to LLM config for the planner (required for planner_react and decomposing).",
     )
+    parser.add_argument(
+        "--agent_url",
+        type=str,
+        default=None,
+        help="URL of external agent endpoint (required for --orchestrator external).",
+    )
     args = parser.parse_args()
+
+    if args.orchestrator == "external":
+        if not args.agent_url:
+            parser.error("--agent_url is required when --orchestrator is 'external'")
 
     os.makedirs(args.output_folder, exist_ok=True)
 
@@ -313,6 +330,11 @@ async def main():
             raise ValueError("Either --configs_folder or --hf_dataset must be provided")
         configs_folder = args.configs_folder
 
+    # Build orchestrator-specific kwargs
+    orchestrator_kwargs = {}
+    if args.agent_url:
+        orchestrator_kwargs["agent_url"] = args.agent_url
+
     config_files = glob.glob(os.path.join(configs_folder, "*.json"))
     for idx in range(int(args.num_runs)):
         output_folder = os.path.join(args.output_folder, f"run_{idx+1}")
@@ -323,6 +345,7 @@ async def main():
                 cfg, args.llm_config, output_folder,
                 orchestrator=args.orchestrator,
                 planner_llm_config=args.planner_llm_config,
+                orchestrator_kwargs=orchestrator_kwargs,
             ),
             concurrency=int(args.concurrency),
         )
