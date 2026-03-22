@@ -41,8 +41,8 @@ def create_app(agent_name: str, skill_instruction: str, model: str = "gemini-2.0
     """Create a FastAPI app that bridges OpsGym payloads to an ADK agent."""
     app = FastAPI(title=f"{agent_name} OpsGym Agent")
 
-    @app.post("/task")
-    async def handle_task(req: OpsGymRequest) -> OpsGymResponse:
+    async def _run_agent(req: OpsGymRequest) -> OpsGymResponse:
+        """Run the ADK agent in a clean async context to avoid cancel scope issues."""
         # 1. Build MCP toolsets from payload (dynamic per-request)
         toolsets = []
         for srv in req.mcp_servers:
@@ -78,30 +78,55 @@ def create_app(agent_name: str, skill_instruction: str, model: str = "gemini-2.0
         tool_results = []
         final_text = ""
 
-        async for event in runner.run_async(user_id="opsgym", session_id=session.id, new_message=user_msg):
-            if event.is_final_response() and event.content and event.content.parts:
-                final_text = "".join(p.text for p in event.content.parts if p.text)
-            # Track tool calls from events
-            if hasattr(event, "function_calls") and event.function_calls:
-                for fc in event.function_calls:
-                    tools_used.append(fc.name)
-            if hasattr(event, "function_responses") and event.function_responses:
-                for fr in event.function_responses:
-                    tool_results.append({
-                        "tool_name": fr.name,
-                        "arguments": {},
-                        "result": fr.response if hasattr(fr, "response") else {},
-                    })
+        try:
+            async for event in runner.run_async(user_id="opsgym", session_id=session.id, new_message=user_msg):
+                if event.is_final_response() and event.content and event.content.parts:
+                    final_text = "".join(p.text for p in event.content.parts if p.text)
+                if hasattr(event, "function_calls") and event.function_calls:
+                    for fc in event.function_calls:
+                        tools_used.append(fc.name)
+                if hasattr(event, "function_responses") and event.function_responses:
+                    for fr in event.function_responses:
+                        tool_results.append({
+                            "tool_name": fr.name,
+                            "arguments": {},
+                            "result": fr.response if hasattr(fr, "response") else {},
+                        })
+        except Exception as e:
+            logger.error(f"Agent execution error: {e}")
+            if not final_text:
+                final_text = f"Agent encountered an error during execution: {e}"
 
         # 4. Cleanup MCP connections
         for ts in toolsets:
-            await ts.close()
+            try:
+                await ts.close()
+            except Exception:
+                pass
 
         return OpsGymResponse(
             final_response=final_text,
             tools_used=list(set(tools_used)),
             tool_results=tool_results,
         )
+
+    @app.post("/task")
+    async def handle_task(req: OpsGymRequest) -> OpsGymResponse:
+        # Run in a dedicated thread with its own event loop to avoid
+        # anyio cancel scope conflicts between FastAPI and ADK's MCP sessions.
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _run_in_thread():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(_run_agent(req))
+            finally:
+                loop.close()
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        return await asyncio.get_event_loop().run_in_executor(executor, _run_in_thread)
 
     return app
 

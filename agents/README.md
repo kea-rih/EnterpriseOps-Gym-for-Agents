@@ -237,17 +237,20 @@ python compute_score.py --results_folder results/itsm-adk-agent
 | SLA link | PASS |
 | Notification sent | PASS |
 
-## Benchmark Results (ITSM Domain)
+## Benchmark Results
 
-Model: `gemini-3-flash-preview` | Mode: Oracle | 103 tasks
+Model: `gemini-3-flash-preview` | Mode: Oracle
 
-| Metric | Value |
-|--------|-------|
-| Total Tasks | 103 |
-| Successful | 29 (28.16%) |
-| Failed | 67 |
-| Errors | 7 |
-| Avg Verifier Pass Rate | 56.65% |
+| Domain | Tasks | Errors | Success Rate | Verifier Pass Rate |
+|--------|-------|--------|-------------|-------------------|
+| **ITSM** | 103 | 7 | **28.16%** | **56.65%** |
+| **Calendar** | 61 | 5 | **13.11%** | **60.11%** |
+| **CSM** | 103 | 0 | **0.97%** | **6.24%** |
+
+**Notes:**
+- ITSM performed best overall with strong policy compliance and multi-step tool execution
+- Calendar achieved the highest verifier pass rate (60%) despite lower task success — individual steps often pass but full task completion is harder
+- CSM scored low due to ADK tool schema compatibility issues with certain MCP tools (e.g. `find_product` output schema validation). The agent returns error messages instead of completing tasks when these tools are involved
 
 ## API Reference
 
