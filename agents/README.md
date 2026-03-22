@@ -214,14 +214,14 @@ python evaluate.py \
 python compute_score.py --results_folder results/itsm-adk-agent
 ```
 
-## Example: Task Execution
+## Examples: Task Execution by Domain
 
-### Prompt
+### ITSM Agent — Incident Escalation with SLA
 
+**Prompt:**
 > After identifying that incident INC0000011 is still pending in our workspace which recently was again brought to our notice by Carlos Rodriguez as it's highly impacting his Wi-Fi networks, indicating a high business impact that should be updated accordingly. Progress the work on this incident so as to get it quickly resolved, check if there are any SLAs already linked, if not provide a valid and appropriate SLA and align it to the incident. Also notify Carlos regarding the same.
 
-### Agent Response
-
+**Agent Response:**
 > I have processed the request for incident **INC0000011** regarding the Wi-Fi network issues reported by Carlos Rodriguez.
 >
 > **Actions Taken:**
@@ -229,13 +229,65 @@ python compute_score.py --results_folder results/itsm-adk-agent
 > 2. **SLA Check & Link:** Verified no existing SLA was linked. Created and aligned an appropriate SLA based on the High priority.
 > 3. **Notification:** Sent notification to Carlos Rodriguez regarding the incident update and priority escalation.
 
-### Verification Results
+**Verification Results:**
 
 | Verifier | Result |
 |----------|--------|
 | Incident update | PASS |
 | SLA link | PASS |
 | Notification sent | PASS |
+
+---
+
+### Calendar Agent — Multi-Calendar Setup with Events
+
+**Prompt:**
+> Find all calendars and identify any whose summaries contain 'Design,' 'Marketing,' or 'Research.' Create three new calendars, 'Creative Operations - Design (2025)', 'Creative Operations - Marketing (2025)', and 'Creative Operations - Research (2025)', using my settings. Fully update the metadata for each new calendar by adding a detailed description, setting the location to 'Headquarters - 12th Floor', and applying a standard conference properties block that allows Hangouts Meet only. Clear all events from the primary calendars, and remove any previously created calendars from my list...
+
+**Agent Response:**
+> I have completed the requested calendar management tasks. Here is a summary of the actions taken:
+>
+> **1. Calendar Cleanup and Audit**
+> - Scanned your existing calendars. No existing calendars were found with "Design," "Marketing," or "Research" in their summaries.
+> - All events have been cleared from your primary calendar.
+> - Removed the "Team Coordination" calendar from your list as it was a non-primary calendar.
+>
+> **2. New Secondary Calendars Created** — Three new calendars have been created with detailed descriptions, location set to 'Headquarters - 12th Floor', and Hangouts Meet conference properties applied.
+
+**Verification Results (11 verifiers):**
+
+| Verifier | Result |
+|----------|--------|
+| verify_design_calendar_created | PASS |
+| verify_marketing_calendar_created | PASS |
+| verify_research_calendar_created | PASS |
+| verify_primary_calendar_events_cleared | PASS |
+| verify_non_primary_calendars_removed | PASS |
+| verify_design_kickoff_event | PASS |
+| verify_marketing_kickoff_event | PASS |
+| verify_research_kickoff_event | PASS |
+| verify_design_event_has_meet_link | PASS |
+| verify_marketing_event_has_meet_link | PASS |
+| verify_research_event_has_meet_link | PASS |
+
+---
+
+### CSM Agent — Case Reopening (Partial Success)
+
+**Prompt:**
+> Hey it's Sheri Trujillo from Tier-2 Ops. They just called me directly – that PostgreSQL OOM crash we closed last week as resolved (CS-0001213) because the customer said it was fixed? Total false positive. It's back right now and has completely taken down their entire test environment. They're already $250k behind on releases and the CISO is getting pulled in. Please pull CS-0001213 out of closed immediately, bump the reopen_count by 1, move it straight to pending, set priority to critical, keep the channel as alert, assign it to me (Sheri Trujillo), and send a notification...
+
+**Agent Response:**
+> Agent encountered an error during execution: Tool search_cases has an output schema but did not return structured content
+
+**Verification Results:**
+
+| Verifier | Result |
+|----------|--------|
+| Verify case closed | PASS |
+| Verify Notification | PASS |
+
+> **Note:** CSM tasks frequently hit an ADK compatibility issue where certain MCP tools define output schemas that ADK validates strictly. The agent catches the error but cannot complete the full task, resulting in partial verifier passes.
 
 ## Benchmark Results
 
