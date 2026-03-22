@@ -97,6 +97,134 @@ Each agent server exposes two interfaces:
    if the agent achieved the correct outcome
 ```
 
+## Responsibilities: Agent vs Gym Harness
+
+The system has a clear separation of concerns between the **OpsGym benchmark harness** (evaluate.py + executor) and the **ADK agent servers**.
+
+### OpsGym Benchmark Harness (evaluate.py + BenchmarkExecutor)
+
+The harness owns the **lifecycle** — everything before and after the agent runs:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  OpsGym Benchmark Harness                    │
+│                                                             │
+│  1. Load task configs from HuggingFace dataset              │
+│  2. For each task:                                          │
+│     a. Read SQL seed file from disk                         │
+│     b. POST /api/seed-database → MCP server                 │
+│        (creates a fresh SQLite DB for this task)            │
+│     c. Build payload with:                                  │
+│        - system_prompt (domain policies)                    │
+│        - user_prompt (the task)                             │
+│        - mcp_servers (URL + database_id + auth context)     │
+│        - selected_tools (oracle tool set)                   │
+│     d. POST /task → Agent server                            │
+│        (hands off to the agent — harness waits)             │
+│     e. Receive agent response                               │
+│     f. Run SQL verifiers against the database               │
+│        (check if the agent achieved correct outcome)        │
+│     g. Record pass/fail results                             │
+│  3. Aggregate statistics across all tasks                    │
+│  4. Clean up databases                                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key responsibilities:**
+- **Database lifecycle** — creates and deletes per-task databases
+- **Task distribution** — sends tasks to agents with concurrency control
+- **Verification** — runs SQL queries against the database to check outcomes
+- **Scoring** — aggregates pass/fail across verifiers and tasks
+- **Retry logic** — retries failed tasks up to 5 times
+
+### ADK Agent Server (agents/)
+
+The agent owns the **execution** — reasoning and tool calling:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    ADK Agent Server                          │
+│                                                             │
+│  1. Receive POST /task with payload                         │
+│  2. Create dynamic MCP connection using:                    │
+│     - database_id from payload (which DB to operate on)     │
+│     - auth context headers (who the user is)                │
+│     - selected_tools filter (which tools are available)     │
+│  3. Construct LlmAgent with:                                │
+│     - SKILL.md (domain expertise)                           │
+│     - system_prompt from harness (policies)                 │
+│     - MCP tools discovered from server                      │
+│  4. ADK orchestration loop:                                 │
+│     a. Send prompt + tools to Gemini                        │
+│     b. Gemini decides: call a tool or respond               │
+│     c. If tool call → execute via MCP → send result back    │
+│     d. Repeat until Gemini produces final answer            │
+│  5. Return response + tool history to harness               │
+│                                                             │
+│  The agent MODIFIES the database through MCP tool calls.    │
+│  The harness then VERIFIES those modifications.             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key responsibilities:**
+- **MCP connection** — connects to gym MCP server with correct DB and auth
+- **Tool discovery** — discovers available tools from the MCP server
+- **Reasoning** — uses Gemini to decide which tools to call and in what order
+- **Tool execution** — calls MCP tools that modify the database
+- **Response generation** — summarizes what was done
+
+### How Verification Works
+
+Verification is **outcome-based** — the harness checks the **final state of the database**, not the sequence of actions the agent took. This means an agent can take any path to the correct outcome.
+
+```
+                    Agent executes task
+                           │
+                    ┌──────┴──────┐
+                    │  MCP Tools  │
+                    │  modify the │
+                    │  SQLite DB  │
+                    └──────┬──────┘
+                           │
+                    Agent returns response
+                           │
+                    ┌──────┴──────┐
+                    │   Harness   │
+                    │  runs SQL   │
+                    │  verifiers  │
+                    └──────┬──────┘
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+         Verifier 1   Verifier 2   Verifier 3
+              │            │            │
+    "SELECT COUNT(*)  "SELECT COUNT(*)  "SELECT COUNT(*)
+     FROM incident     FROM sla WHERE    FROM notification
+     WHERE status=     incident_id=      WHERE email=
+     'in_progress'"   'INC_011'"        'carlos@...'"
+              │            │            │
+           Result=1     Result=1     Result=1
+           Expected=1   Expected=1   Expected=1
+              │            │            │
+            PASS         PASS         PASS
+```
+
+Each verifier is defined in the task config as:
+```json
+{
+  "verifier_type": "database_state",
+  "name": "Incident update",
+  "gym_name": "gym-itsm-mcp",
+  "validation_config": {
+    "query": "SELECT COUNT(*) FROM incident WHERE incident_id='INC_011' AND status='in_progress' AND impact='high'",
+    "expected_value": 1,
+    "comparison_type": "equals"
+  }
+}
+```
+
+The harness sends the SQL query to the MCP server (which runs it against the task's database), compares the result to the expected value, and records pass/fail. A task succeeds only if **all** its verifiers pass.
+
 ### Key Design: Dynamic MCP Connections
 
 OpsGym creates a **fresh database per task**. The agent server creates a new `McpToolset` for each request with the task-specific `database_id` and auth context passed as HTTP headers. This ensures complete isolation between benchmark tasks.
